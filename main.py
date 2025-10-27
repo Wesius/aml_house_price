@@ -1,9 +1,12 @@
 # pip install catboost==1.2.5 pandas numpy scikit-learn
-import os, warnings, math
+import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_log_error
+from pandas.api.types import is_object_dtype
 from catboost import CatBoostRegressor, Pool
 
 # --- Load
@@ -24,45 +27,49 @@ y = np.log1p(train[TARGET].astype(float))
 X = train.drop(columns=[TARGET, ID_COL])
 X_test = test.drop(columns=[ID_COL])
 
-# numeric-looking columns you still want treated as categories
+# --- Categorical handling (fix for CatBoost NaN error)
+# Treat these integer-coded columns as categoricals
 force_cat = {"MSSubClass", "MoSold", "YrSold"}
 
-# Make CatBoost’s life easy: object->category; force some ints to category
-for c in X.columns:
-    if c in force_cat:
-        X[c] = X[c].astype("category")
-        X_test[c] = X_test[c].astype("category")
-    elif X[c].dtype == "object":
-        X[c] = X[c].astype("category")
-        X_test[c] = X_test[c].astype("category")
+# Determine categorical columns: objects OR explicitly forced integers
+cat_cols = [c for c in X.columns if (c in force_cat) or is_object_dtype(X[c])]
+
+# Convert categoricals to strings and fill NaNs with a sentinel
+SENTINEL = "__NA__"
+for c in cat_cols:
+    X[c] = X[c].astype("object").fillna(SENTINEL).astype(str)
+    X_test[c] = X_test[c].astype("object").fillna(SENTINEL).astype(str)
+
+# Sanity checks
+assert not any(X[c].isna().any() for c in cat_cols)
+assert not any(X_test[c].isna().any() for c in cat_cols)
 
 # CatBoost needs categorical feature indices (0-based)
-cat_features = [i for i, c in enumerate(X.columns) if str(X[c].dtype) == "category"]
+cat_features = [X.columns.get_loc(c) for c in cat_cols]
 
 # --- CV + bagging across seeds
-SEEDS = [42, 1337, 2025]   # bump to 5–10 for a bit more stability
+SEEDS = [42, 1337, 2025]   # bump to 5–10 for extra stability on H100
 FOLDS = 5
 
 def rmsle_from_log(log_preds, y_true):
     """Compute RMSLE after inverse transform."""
     preds = np.expm1(log_preds)
     true  = np.expm1(y_true)
-    # Clip to avoid negatives from numeric noise
     preds = np.clip(preds, 0, None)
     return mean_squared_log_error(true, preds, squared=False)
 
 params = dict(
-    loss_function="RMSE",         # we optimized in log-space (RMSLE proxy)
+    loss_function="RMSE",         # optimizing RMSE in log-space acts as RMSLE
     eval_metric="RMSE",
     learning_rate=0.05,
-    depth=8,                      # 6–10 is a good band
-    l2_leaf_reg=6.0,              # 3–10 usually works well
+    depth=8,                      # try {6,8,10} in HPO
+    l2_leaf_reg=6.0,              # try {3,6,10,20}
     random_strength=1.5,
     bootstrap_type="Bayesian",
-    bagging_temperature=0.5,      # mild stochasticity
+    bagging_temperature=0.5,
     one_hot_max_size=12,
-    border_count=254,             # good for GPU
-    task_type="GPU",              # use H100
+    border_count=254,
+    task_type="GPU",              # H100
     devices="0",
     od_type="Iter",
     od_wait=200,
@@ -91,11 +98,11 @@ for seed in SEEDS:
         fold_oof[va] = va_pred_log
         fold_preds  += model.predict(te_pool) / FOLDS
 
-        # Optional: print fold RMSLE
+        # Optional: per-fold RMSLE
         fold_rmsle = rmsle_from_log(va_pred_log, y_va.values)
         print(f"[seed {seed}] fold {fold} RMSLE: {fold_rmsle:.5f}")
 
-    # accumulate
+    # accumulate across folds and seeds
     oof_pred += fold_oof / len(SEEDS)
     test_pred_accum += fold_preds / len(SEEDS)
 
