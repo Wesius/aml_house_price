@@ -115,7 +115,6 @@ params = dict(
     bagging_temperature=0.5,
     one_hot_max_size=12,
     border_count=254,
-    rsm=0.8,                       # feature subsampling
     task_type="GPU",               # use H100
     devices="0",
     od_type="Iter",
