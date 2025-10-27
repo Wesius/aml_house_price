@@ -7,8 +7,8 @@ from sklearn.metrics import mean_squared_log_error
 from catboost import CatBoostRegressor, Pool
 
 # --- Load
-train = pd.read_csv("train.csv")
-test  = pd.read_csv("test.csv")
+train = pd.read_csv("data/train.csv")
+test  = pd.read_csv("data/test.csv")
 ID_COL = "Id"
 TARGET = "SalePrice"
 
